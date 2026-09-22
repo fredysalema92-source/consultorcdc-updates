@@ -1,0 +1,235 @@
+<!DOCTYPE html>
+<html lang="es">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<title>Enviar comprobante</title>
+<style>
+ :root{--ok:#059669;--mal:#b91c1c;--gris:#64748b;--linea:#e2e8f0}
+ *{box-sizing:border-box;-webkit-tap-highlight-color:transparent}
+ body{margin:0;padding:16px;font-family:system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+      background:#f8fafc;color:#0f172a}
+ header{text-align:center;padding:14px 0 18px}
+ header h1{margin:0;font-size:19px}
+ header p{margin:6px 0 0;color:var(--gris);font-size:14px}
+ #falla{display:none;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;
+        border-radius:12px;padding:16px;font-size:15px;line-height:1.5}
+ #zona{display:none}
+ .btn{display:flex;align-items:center;justify-content:center;gap:10px;width:100%;
+      border:none;border-radius:16px;font-size:19px;font-weight:700;padding:22px 16px;
+      background:#1d4ed8;color:#fff;cursor:pointer}
+ .btn:active{background:#1e40af}
+ .btn.sec{background:#fff;color:#334155;border:1px solid #cbd5e1;font-size:16px;
+          font-weight:600;padding:15px;margin-top:10px}
+ #lista{margin-top:20px}
+ .fila{display:flex;gap:11px;align-items:center;background:#fff;border:1px solid var(--linea);
+       border-radius:12px;padding:11px 13px;margin-bottom:9px}
+ .fila img{width:46px;height:60px;object-fit:cover;border-radius:6px;flex:none;background:#e2e8f0}
+ .fila .txt{min-width:0;flex:1}
+ .fila b{display:block;font-size:14px;overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+ .fila span{font-size:13px;color:var(--gris)}
+ .barra{height:4px;background:#e2e8f0;border-radius:4px;margin-top:5px;overflow:hidden}
+ .barra i{display:block;height:100%;background:#1d4ed8;width:0;transition:width .2s}
+ .reint{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:6px 11px;
+        font-size:13px;font-weight:600;cursor:pointer}
+ footer{margin-top:26px;text-align:center;color:#94a3b8;font-size:12px;line-height:1.6}
+</style>
+</head>
+<body>
+
+<header>
+  <h1>📄 Enviar comprobante</h1>
+  <p id="sub">conectando…</p>
+</header>
+
+<div id="falla"></div>
+
+<div id="zona">
+  <button class="btn" onclick="document.getElementById('camara').click()">📷 Sacar foto</button>
+  <button class="btn sec" onclick="document.getElementById('galeria').click()">🖼️ Elegir de la galería</button>
+  <input id="camara"  type="file" accept="image/*" capture="environment" hidden>
+  <input id="galeria" type="file" accept="image/*" multiple hidden>
+  <div id="lista"></div>
+</div>
+
+<footer>
+  Cada foto es un comprobante.<br>
+  Se envía sola a la PC de contabilidad.
+</footer>
+
+<script>
+// ---------------------------------------------------------------------------
+// Puente celular -> Supabase -> PC de contabilidad.
+//
+// El token viaja en el # de la direccion: asi NO llega al servidor que sirve
+// esta pagina, solo vive en el telefono. Cada token es de UN celular y de UN
+// usuario, y las fotos caen en su propia carpeta: nunca se mezclan.
+//
+// La foto se achica y se envuelve en un PDF ACA, en el telefono, para que lo
+// que llega ya sea el documento final. El JPEG se mete tal cual adentro del
+// PDF (DCTDecode): no se recomprime, asi que no se pierde nada por envolverlo.
+// ---------------------------------------------------------------------------
+var URL_SB = "https://ctntdtcbxbzukdjcidhe.supabase.co";
+var CLAVE  = "sb_publishable_qUWZiek87hkF0ZG4AtuUBg_q8dFCGUd";
+var LADO   = 2000;     // lado largo en pixeles: alcanza para leer un timbrado
+var CALIDAD = 0.85;
+
+var token = (location.hash || "").replace(/^#/, "").trim();
+var n = 0;
+
+function $(id){ return document.getElementById(id); }
+
+function morir(msg){
+  $("sub").textContent = "";
+  $("falla").style.display = "block";
+  $("falla").innerHTML = msg;
+}
+
+// ---- arranque: el enlace sigue vivo? ----
+(function(){
+  if(!token){
+    morir("<b>Enlace incompleto.</b><br>Pedile a contabilidad que te mande el código QR de nuevo.");
+    return;
+  }
+  fetch(URL_SB + "/rest/v1/puente_estado?select=dispositivo,activo&token=eq." + encodeURIComponent(token),
+        {headers:{apikey:CLAVE, Authorization:"Bearer " + CLAVE}})
+   .then(function(r){ return r.json(); })
+   .then(function(j){
+     if(!j || !j.length){
+       morir("<b>Este enlace no existe.</b><br>Pedile a contabilidad que te mande uno nuevo.");
+       return;
+     }
+     if(!j[0].activo){
+       morir("<b>Este enlace fue desvinculado.</b><br>Pedile a contabilidad que te mande uno nuevo.");
+       return;
+     }
+     $("sub").textContent = j[0].dispositivo || "celular vinculado";
+     $("zona").style.display = "block";
+   })
+   .catch(function(){
+     morir("<b>Sin conexión.</b><br>Revisá los datos o el wifi y volvé a abrir esta página.");
+   });
+})();
+
+// ---- achicar la foto ----
+function achicar(file){
+  return new Promise(function(res, rej){
+    var img = new Image(), url = URL.createObjectURL(file);
+    img.onload = function(){
+      var w = img.naturalWidth, h = img.naturalHeight;
+      var esc = Math.min(1, LADO / Math.max(w, h));
+      var cw = Math.round(w * esc), ch = Math.round(h * esc);
+      var c = document.createElement("canvas");
+      c.width = cw; c.height = ch;
+      c.getContext("2d").drawImage(img, 0, 0, cw, ch);
+      URL.revokeObjectURL(url);
+      c.toBlob(function(b){
+        if(!b) return rej(new Error("no pude achicar la foto"));
+        b.arrayBuffer().then(function(ab){
+          res({bytes:new Uint8Array(ab), w:cw, h:ch, vista:c.toDataURL("image/jpeg", 0.4)});
+        });
+      }, "image/jpeg", CALIDAD);
+    };
+    img.onerror = function(){ URL.revokeObjectURL(url); rej(new Error("no pude abrir la foto")); };
+    img.src = url;
+  });
+}
+
+// ---- envolver el JPEG en un PDF de una hoja ----
+// OJO con el tamaño de la hoja: va en PUNTOS (1/72 de pulgada), no en píxeles. Y el número
+// no es cualquiera: tiene que ser EL MISMO con el que el lector rasteriza el PDF (250 ppp),
+// para que la imagen salga píxel por píxel como entró.
+//
+// Medido el 19/09/2026 con la factura de CAPACO: la imagen embebida y el JPEG original se
+// leen igual de bien (timbrado 18779570), pero rasterizada a 2105 px —un 25% más grande—
+// el lector local leía 80023162, que es el RUC. Agrandar no agrega información: la inventa.
+var PPP_HOJA = 250;
+
+function pdfDeJpeg(jpg, w, h){
+  var pw = Math.round(w * 72 / PPP_HOJA), ph = Math.round(h * 72 / PPP_HOJA);
+  var partes = [], largo = 0, pos = [];
+  function txt(s){ var u = new TextEncoder().encode(s); partes.push(u); largo += u.length; }
+  function bin(u){ partes.push(u); largo += u.length; }
+  function marcar(){ pos.push(largo); }
+
+  txt("%PDF-1.4\n");
+  marcar(); txt("1 0 obj\n<</Type/Catalog/Pages 2 0 R>>\nendobj\n");
+  marcar(); txt("2 0 obj\n<</Type/Pages/Kids[3 0 R]/Count 1>>\nendobj\n");
+  marcar(); txt("3 0 obj\n<</Type/Page/Parent 2 0 R/MediaBox[0 0 " + pw + " " + ph +
+                "]/Resources<</XObject<</I 4 0 R>>>>/Contents 5 0 R>>\nendobj\n");
+  marcar(); txt("4 0 obj\n<</Type/XObject/Subtype/Image/Width " + w + "/Height " + h +
+                "/ColorSpace/DeviceRGB/BitsPerComponent 8/Filter/DCTDecode/Length " +
+                jpg.length + ">>\nstream\n");
+            bin(jpg);
+            txt("\nendstream\nendobj\n");
+  var flujo = pw + " 0 0 " + ph + " 0 0 cm /I Do";
+  marcar(); txt("5 0 obj\n<</Length " + (flujo.length + 4) + ">>\nstream\nq " + flujo +
+                " Q\nendstream\nendobj\n");
+  var xref = largo;
+  var t = "xref\n0 6\n0000000000 65535 f \n";
+  for(var i = 0; i < 5; i++){
+    t += ("0000000000" + pos[i]).slice(-10) + " 00000 n \n";
+  }
+  t += "trailer\n<</Size 6/Root 1 0 R>>\nstartxref\n" + xref + "\n%%EOF\n";
+  txt(t);
+
+  var todo = new Uint8Array(largo), o = 0;
+  for(var k = 0; k < partes.length; k++){ todo.set(partes[k], o); o += partes[k].length; }
+  return todo;
+}
+
+// ---- una foto: achicar, armar PDF, subir ----
+function mandar(file){
+  n++;
+  var id = "f" + n;
+  var fila = document.createElement("div");
+  fila.className = "fila";
+  fila.id = id;
+  fila.innerHTML = '<img alt=""><span class="txt"><b>preparando…</b>' +
+                   '<span class="est">un momento</span><span class="barra"><i></i></span></span>';
+  $("lista").insertBefore(fila, $("lista").firstChild);
+
+  var vista = fila.querySelector("img");
+  var tit   = fila.querySelector("b");
+  var est   = fila.querySelector(".est");
+  var barra = fila.querySelector(".barra i");
+
+  function estado(t, color){ est.textContent = t; est.style.color = color || ""; }
+
+  achicar(file).then(function(f){
+    vista.src = f.vista;
+    tit.textContent = "Comprobante " + n;
+    estado("enviando…");
+    barra.style.width = "35%";
+    var pdf = pdfDeJpeg(f.bytes, f.w, f.h);
+    var nombre = Date.now() + "-" + Math.random().toString(36).slice(2, 7) + ".pdf";
+    var ruta = URL_SB + "/storage/v1/object/puente/" + encodeURIComponent(token) + "/" + nombre;
+    barra.style.width = "70%";
+    return fetch(ruta, {method:"POST",
+      headers:{apikey:CLAVE, Authorization:"Bearer " + CLAVE, "Content-Type":"application/pdf"},
+      body:pdf});
+  }).then(function(r){
+    if(!r.ok) throw new Error("HTTP " + r.status);
+    barra.style.width = "100%";
+    estado("✓ enviado — ya está en la PC de contabilidad", "var(--ok)");
+  }).catch(function(e){
+    barra.style.width = "0";
+    estado("✗ no se pudo enviar (" + (e.message || "error") + ")", "var(--mal)");
+    var b = document.createElement("button");
+    b.className = "reint";
+    b.textContent = "Reintentar";
+    b.onclick = function(){ fila.remove(); n--; mandar(file); };
+    fila.appendChild(b);
+  });
+}
+
+function tomar(el){
+  var f = el.files;
+  for(var i = 0; i < f.length; i++) mandar(f[i]);
+  el.value = "";          // asi la misma foto se puede volver a mandar
+}
+$("camara").onchange  = function(){ tomar(this); };
+$("galeria").onchange = function(){ tomar(this); };
+</script>
+</body>
+</html>

@@ -33,6 +33,22 @@
  .reint{border:1px solid #cbd5e1;background:#fff;border-radius:8px;padding:6px 11px;
         font-size:13px;font-weight:600;cursor:pointer}
  footer{margin-top:26px;text-align:center;color:#94a3b8;font-size:12px;line-height:1.6}
+ /* la pantalla de recorte: ocupa todo, porque ajustar esquinas con el dedo
+    necesita la foto lo mas grande posible */
+ #recOv{display:none;position:fixed;inset:0;background:#0f172a;z-index:9000;
+        flex-direction:column;padding:12px}
+ #recCont{position:relative;flex:1;display:flex;align-items:center;justify-content:center;
+          min-height:0}
+ #recImg{max-width:100%;max-height:100%;object-fit:contain;display:block}
+ #recCaja{position:absolute;border:2px solid #38bdf8;box-shadow:0 0 0 9999px rgba(15,23,42,.62)}
+ /* las manijas son grandes a proposito: 30 px es lo minimo que se agarra con el
+    dedo sin tener que apuntar, y esto se usa parado en una obra */
+ #recCaja .m{position:absolute;width:30px;height:30px;background:#38bdf8;border-radius:50%;
+             border:2px solid #fff}
+ #recCaja .ia{left:-15px;top:-15px}   #recCaja .da{right:-15px;top:-15px}
+ #recCaja .ib{left:-15px;bottom:-15px} #recCaja .db{right:-15px;bottom:-15px}
+ #recAviso{color:#cbd5e1;text-align:center;font-size:13.5px;margin:10px 0 0}
+ #recPie{padding-top:10px}
 </style>
 </head>
 <body>
@@ -50,6 +66,27 @@
   <input id="camara"  type="file" accept="image/*" capture="environment" hidden>
   <input id="galeria" type="file" accept="image/*" multiple hidden>
   <div id="lista"></div>
+</div>
+
+<div id="recOv">
+  <div id="recCont">
+    <img id="recImg" alt="">
+    <div id="recCaja">
+      <i class="m ia" ontouchstart="recTomar(event,'ia')" onmousedown="recTomar(event,'ia')"></i>
+      <i class="m da" ontouchstart="recTomar(event,'da')" onmousedown="recTomar(event,'da')"></i>
+      <i class="m ib" ontouchstart="recTomar(event,'ib')" onmousedown="recTomar(event,'ib')"></i>
+      <i class="m db" ontouchstart="recTomar(event,'db')" onmousedown="recTomar(event,'db')"></i>
+    </div>
+  </div>
+  <p id="recAviso"></p>
+  <div id="recPie">
+    <button class="btn" onclick="recEnviar()">✓ Enviar</button>
+    <div style="display:flex;gap:9px;margin-top:9px">
+      <button class="btn sec" style="margin:0" onclick="recGirar()">↻ Girar</button>
+      <button class="btn sec" style="margin:0" onclick="recTodo()">⬜ Toda la foto</button>
+      <button class="btn sec" style="margin:0" onclick="recCerrar();recSiguiente()">✕</button>
+    </div>
+  </div>
 </div>
 
 <footer>
@@ -147,17 +184,125 @@ function morir(msg){
    });
 })();
 
-// ---- achicar la foto ----
-function achicar(file){
+// ---------------------------------------------------------------------------
+// ENCONTRAR EL PAPEL DENTRO DE LA FOTO
+//
+// Una foto de una factura sobre un escritorio trae la mesa, la sombra y lo que
+// haya alrededor. Eso le ensucia la lectura a la IA —el importe y el timbrado
+// se leen peor— y ademas pesa de mas, que es lo unico que consume egress.
+//
+// COMO LO BUSCA, y por que asi: el papel es lo mas CLARO de la foto. Se achica
+// la imagen a 260 px, se pasa a grises, se separa claro de oscuro con el metodo
+// de Otsu —que elige el corte solo, sin numeros a mano— y se mira en que filas y
+// en que columnas hay suficientes pixeles claros. El rectangulo que queda es el
+// papel.
+//
+// Se probaron antes ideas mas ambiciosas (detectar las cuatro esquinas y
+// enderezar). Esto es a proposito mas modesto: acierta en el caso comun y, sobre
+// todo, FALLA BIEN.
+//
+// PORQUE FALLAR BIEN ES EL PUNTO. Fredy eligio la deteccion automatica sabiendo
+// que cuando se equivoca molesta mas de lo que ayuda —papel blanco sobre mesa
+// blanca, sombras fuertes—. Asi que si el resultado no es creible (ocupa casi
+// toda la foto, o casi nada, o queda muy alargado) NO se propone nada raro: se
+// devuelve null y el recuadro arranca al 90%, que es lo que habria pasado sin
+// deteccion. Nunca deja al usuario peor que si esto no existiera.
+// ---------------------------------------------------------------------------
+function detectarPapel(img){
+  try{
+    var LADO_D = 260;
+    var esc = Math.min(1, LADO_D / Math.max(img.naturalWidth, img.naturalHeight));
+    var w = Math.max(24, Math.round(img.naturalWidth * esc));
+    var h = Math.max(24, Math.round(img.naturalHeight * esc));
+    var c = document.createElement("canvas");
+    c.width = w; c.height = h;
+    var cx = c.getContext("2d");
+    cx.drawImage(img, 0, 0, w, h);
+    var d = cx.getImageData(0, 0, w, h).data;
+
+    // a grises, y el histograma para Otsu
+    var g = new Uint8Array(w * h), hist = new Array(256).fill(0);
+    for(var i = 0, p = 0; i < d.length; i += 4, p++){
+      var v = (d[i] * 299 + d[i+1] * 587 + d[i+2] * 114) / 1000 | 0;
+      g[p] = v; hist[v]++;
+    }
+
+    // Otsu: el corte que mejor separa dos grupos. Se elige solo, sin numeros
+    // puestos a mano que funcionen con una luz y no con otra.
+    var total = w * h, suma = 0;
+    for(var t = 0; t < 256; t++) suma += t * hist[t];
+    var sumaB = 0, pesoB = 0, mejor = 0, corte = 128;
+    for(t = 0; t < 256; t++){
+      pesoB += hist[t]; if(!pesoB) continue;
+      var pesoF = total - pesoB; if(!pesoF) break;
+      sumaB += t * hist[t];
+      var mB = sumaB / pesoB, mF = (suma - sumaB) / pesoF;
+      var entre = pesoB * pesoF * (mB - mF) * (mB - mF);
+      if(entre > mejor){ mejor = entre; corte = t; }
+    }
+
+    // en que filas y columnas hay suficientes pixeles claros
+    var filas = new Array(h).fill(0), cols = new Array(w).fill(0);
+    for(var y = 0; y < h; y++)
+      for(var x = 0; x < w; x++)
+        if(g[y * w + x] > corte){ filas[y]++; cols[x]++; }
+
+    function tramo(arr, tope){
+      var a = -1, b = -1;
+      for(var k = 0; k < arr.length; k++) if(arr[k] >= tope){ a = k; break; }
+      for(k = arr.length - 1; k >= 0; k--) if(arr[k] >= tope){ b = k; break; }
+      return [a, b];
+    }
+    var fy = tramo(filas, w * 0.30), fx = tramo(cols, h * 0.30);
+    if(fy[0] < 0 || fx[0] < 0) return null;
+
+    var x0 = fx[0] / w, x1 = (fx[1] + 1) / w, y0 = fy[0] / h, y1 = (fy[1] + 1) / h;
+    var aw = x1 - x0, ah = y1 - y0;
+
+    // ¿es creible? Si no, se devuelve null y manda el recuadro al 90%.
+    if(aw < 0.25 || ah < 0.25) return null;          // demasiado chico: no era el papel
+    if(aw > 0.97 && ah > 0.97) return null;          // toda la foto: no detectó nada
+    var prop = (aw * img.naturalWidth) / (ah * img.naturalHeight);
+    if(prop < 0.25 || prop > 4) return null;         // una tira: casi seguro es un reflejo
+
+    // un respiro de 1,5% para no comerse el borde del papel
+    var m = 0.015;
+    return {x: Math.max(0, x0 - m), y: Math.max(0, y0 - m),
+            w: Math.min(1 - Math.max(0, x0 - m), aw + 2 * m),
+            h: Math.min(1 - Math.max(0, y0 - m), ah + 2 * m)};
+  }catch(e){ return null; }
+}
+
+// ---- achicar la foto (con el recorte ya elegido, si lo hay) ----
+// `rec` viene en proporciones (0 a 1) y no en pixeles: asi el recorte que se
+// eligio mirando la vista chica vale igual sobre la foto original, sin cuentas.
+function achicar(file, rec, giro){
   return new Promise(function(res, rej){
     var img = new Image(), url = URL.createObjectURL(file);
     img.onload = function(){
-      var w = img.naturalWidth, h = img.naturalHeight;
+      var W = img.naturalWidth, H = img.naturalHeight;
+      var sx = 0, sy = 0, sw = W, sh = H;
+      if(rec){
+        sx = Math.round(rec.x * W); sy = Math.round(rec.y * H);
+        sw = Math.max(16, Math.round(rec.w * W)); sh = Math.max(16, Math.round(rec.h * H));
+      }
+      var w = sw, h = sh;
       var esc = Math.min(1, LADO / Math.max(w, h));
       var cw = Math.round(w * esc), ch = Math.round(h * esc);
       var c = document.createElement("canvas");
-      c.width = cw; c.height = ch;
-      c.getContext("2d").drawImage(img, 0, 0, cw, ch);
+      // girado 90 o 270, el lienzo va al reves: si no, la foto sale cortada
+      var g = ((giro || 0) % 360 + 360) % 360, vuelta = (g === 90 || g === 270);
+      c.width  = vuelta ? ch : cw;
+      c.height = vuelta ? cw : ch;
+      var cx = c.getContext("2d");
+      if(g){
+        cx.translate(c.width / 2, c.height / 2);
+        cx.rotate(g * Math.PI / 180);
+        cx.translate(-cw / 2, -ch / 2);
+      }
+      cx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
+      if(g) cx.setTransform(1, 0, 0, 1, 0, 0);
+      cw = c.width; ch = c.height;
       URL.revokeObjectURL(url);
       c.toBlob(function(b){
         if(!b) return rej(new Error("no pude achicar la foto"));
@@ -214,8 +359,8 @@ function pdfDeJpeg(jpg, w, h){
   return todo;
 }
 
-// ---- una foto: achicar, armar PDF, subir ----
-function mandar(file){
+// ---- una foto: recortar, girar, achicar, armar PDF, subir ----
+function mandar(file, rec, giro){
   n++;
   var id = "f" + n;
   var fila = document.createElement("div");
@@ -232,7 +377,10 @@ function mandar(file){
 
   function estado(t, color){ est.textContent = t; est.style.color = color || ""; }
 
-  achicar(file).then(function(f){
+  // la siguiente foto de la tanda se recorta mientras esta se sube
+  setTimeout(recSiguiente, 300);
+
+  achicar(file, rec, giro).then(function(f){
     vista.src = f.vista;
     tit.textContent = "Comprobante " + n;
     estado("enviando…");
@@ -259,11 +407,109 @@ function mandar(file){
   });
 }
 
+// ---------------------------------------------------------------------------
+// LA PANTALLA DE RECORTE
+//
+// Se muestra la foto con el recuadro ya puesto donde `detectarPapel` encontro el
+// documento. Si no encontro nada creible, el recuadro arranca al 90%: nunca deja
+// al usuario peor que si esto no existiera.
+//
+// Se arrastran las esquinas para ajustar. El boton de girar existe porque
+// adivinar la orientacion MIRANDO el dibujo no es fiable —hay facturas
+// legitimamente apaisadas, y girar una que estaba bien es peor que no girar—.
+// La orientacion que graba el telefono (EXIF) si se corrige sola: el navegador
+// la aplica al cargar la imagen.
+// ---------------------------------------------------------------------------
+var _rec = null, _giro = 0, _img = null, _arch = null, _tocando = null;
+
+function recAbrir(file){
+  _arch = file; _giro = 0;
+  var ov = $("recOv"), im = $("recImg");
+  im.onload = function(){
+    _img = im;
+    var d = detectarPapel(im);
+    _rec = d || {x:0.05, y:0.05, w:0.90, h:0.90};
+    $("recAviso").textContent = d ? "Encontré el documento. Ajustá si hace falta."
+                                  : "No pude encontrar el borde. Ajustá el recuadro.";
+    recPintar();
+  };
+  im.src = URL.createObjectURL(file);
+  ov.style.display = "flex";
+}
+
+function recCerrar(){
+  $("recOv").style.display = "none";
+  if(_img && _img.src) URL.revokeObjectURL(_img.src);
+  _img = null; _arch = null;
+}
+
+function recPintar(){
+  var im = $("recImg"), caja = $("recCaja");
+  if(!im || !_rec) return;
+  var r = im.getBoundingClientRect(), p = im.parentNode.getBoundingClientRect();
+  caja.style.left   = (r.left - p.left + _rec.x * r.width) + "px";
+  caja.style.top    = (r.top  - p.top  + _rec.y * r.height) + "px";
+  caja.style.width  = (_rec.w * r.width) + "px";
+  caja.style.height = (_rec.h * r.height) + "px";
+  im.style.transform = "rotate(" + _giro + "deg)";
+}
+
+function recGirar(){
+  _giro = (_giro + 90) % 360;
+  // al girar, el recuadro tambien gira: si no, queda marcando otra parte del papel
+  _rec = {x: 1 - _rec.y - _rec.h, y: _rec.x, w: _rec.h, h: _rec.w};
+  recPintar();
+}
+
+function recTodo(){ _rec = {x:0, y:0, w:1, h:1}; recPintar(); }
+
+// arrastre de las esquinas, con el dedo o con el mouse
+function recTomar(ev, esquina){
+  ev.preventDefault(); _tocando = esquina;
+  function mover(e){
+    if(!_tocando || !_rec) return;
+    var t = (e.touches && e.touches[0]) || e;
+    var r = $("recImg").getBoundingClientRect();
+    var px = Math.min(1, Math.max(0, (t.clientX - r.left) / r.width));
+    var py = Math.min(1, Math.max(0, (t.clientY - r.top)  / r.height));
+    var x0 = _rec.x, y0 = _rec.y, x1 = _rec.x + _rec.w, y1 = _rec.y + _rec.h;
+    if(_tocando.indexOf("i") >= 0) x0 = Math.min(px, x1 - 0.08); else x1 = Math.max(px, x0 + 0.08);
+    if(_tocando.indexOf("a") >= 0) y0 = Math.min(py, y1 - 0.08); else y1 = Math.max(py, y0 + 0.08);
+    _rec = {x:x0, y:y0, w:x1 - x0, h:y1 - y0};
+    recPintar();
+  }
+  function soltar(){
+    _tocando = null;
+    document.removeEventListener("touchmove", mover); document.removeEventListener("mousemove", mover);
+    document.removeEventListener("touchend", soltar);  document.removeEventListener("mouseup", soltar);
+  }
+  document.addEventListener("touchmove", mover, {passive:false});
+  document.addEventListener("mousemove", mover);
+  document.addEventListener("touchend", soltar);
+  document.addEventListener("mouseup", soltar);
+}
+
+function recEnviar(){
+  var f = _arch, r = _rec, g = _giro;
+  recCerrar();
+  if(f) mandar(f, r, g);
+}
+
+var _cola = [];
 function tomar(el){
   var f = el.files;
-  for(var i = 0; i < f.length; i++) mandar(f[i]);
+  for(var i = 0; i < f.length; i++) _cola.push(f[i]);
   el.value = "";          // asi la misma foto se puede volver a mandar
+  recSiguiente();
 }
+
+// De a una: si se eligen cinco de la galeria, se recortan una por una en vez de
+// abrir cinco pantallas encimadas.
+function recSiguiente(){
+  if(!_cola.length) return;
+  recAbrir(_cola.shift());
+}
+
 $("camara").onchange  = function(){ tomar(this); };
 $("galeria").onchange = function(){ tomar(this); };
 </script>

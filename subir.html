@@ -61,20 +61,51 @@
 // ---------------------------------------------------------------------------
 // Puente celular -> Supabase -> PC de contabilidad.
 //
-// El token viaja en el # de la direccion: asi NO llega al servidor que sirve
-// esta pagina, solo vive en el telefono. Cada token es de UN celular y de UN
-// usuario, y las fotos caen en su propia carpeta: nunca se mezclan.
+// ESTA PAGINA NO TIENE NINGUNA CREDENCIAL ADENTRO, y es a proposito.
+//
+// Antes traia la direccion del proyecto y la clave escritas aca. La pagina esta
+// publicada en GitHub, o sea que cualquiera que mirara el fuente las tenia.
+//
+// Ahora las trae el QR, en el # de la direccion:
+//
+//     #t=<token>&u=<url del proyecto>&k=<clave publicable>
+//
+// El # NO se lo manda el navegador al servidor —nunca, por diseno del protocolo—
+// asi que GitHub sirve esta pagina pero jamas ve esa parte. Solo existe en el
+// telefono que escaneo el QR. Lo que queda publicado es una cascara vacia que
+// sin el enlace no sirve para nada.
+//
+// Decision de Fredy (22/09/2026): "lo que si no quiero que este en github es el
+// link de la base de datos, si eso no esta expuesto ahi entonces los que tienen
+// las coordenadas del proyecto nada mas podran consultar y subirlo".
+//
+// El precio, para que este escrito: quien tenga un QR tiene la clave de ese
+// proyecto. Por eso el puente vive en un proyecto APARTE, donde solo hay fotos
+// en transito que se borran al bajarlas. Un QR filtrado no llega a ningun
+// comprobante.
 //
 // La foto se achica y se envuelve en un PDF ACA, en el telefono, para que lo
 // que llega ya sea el documento final. El JPEG se mete tal cual adentro del
 // PDF (DCTDecode): no se recomprime, asi que no se pierde nada por envolverlo.
 // ---------------------------------------------------------------------------
-var URL_SB = "https://ctntdtcbxbzukdjcidhe.supabase.co";
-var CLAVE  = "sb_publishable_qUWZiek87hkF0ZG4AtuUBg_q8dFCGUd";
 var LADO   = 2000;     // lado largo en pixeles: alcanza para leer un timbrado
-var CALIDAD = 0.85;
+var CALIDAD = 0.85;    // OJO: si esto sube, sube el egress. Ver NUBE_2_SUPABASE.txt
 
-var token = (location.hash || "").replace(/^#/, "").trim();
+// Se lee el # como pares clave=valor. Se acepta tambien el formato viejo —el #
+// entero como token— para que los QR ya entregados sigan andando: el QR no
+// vence (decision de Fredy), asi que romperlos seria romper una promesa.
+var _h = (location.hash || "").replace(/^#/, "").trim();
+var URL_SB = "", CLAVE = "", token = "";
+if (_h.indexOf("=") >= 0) {
+  _h.split("&").forEach(function(par){
+    var i = par.indexOf("="), k = par.slice(0, i), v = decodeURIComponent(par.slice(i + 1));
+    if (k === "t") token  = v;
+    if (k === "u") URL_SB = v;
+    if (k === "k") CLAVE  = v;
+  });
+} else {
+  token = _h;
+}
 var n = 0;
 
 function $(id){ return document.getElementById(id); }
@@ -87,11 +118,16 @@ function morir(msg){
 
 // ---- arranque: el enlace sigue vivo? ----
 (function(){
-  if(!token){
+  if(!token || !URL_SB || !CLAVE){
+    // Sin las coordenadas del QR esta pagina no puede hacer nada, y eso es el diseño:
+    // abierta a mano, es una cáscara vacía.
     morir("<b>Enlace incompleto.</b><br>Pedile a contabilidad que te mande el código QR de nuevo.");
     return;
   }
-  fetch(URL_SB + "/rest/v1/puente_estado?select=dispositivo,activo&token=eq." + encodeURIComponent(token),
+  // `puente_vinculos` — el nombre lo usa la app. Acá decía `puente_estado`, una tabla que
+  // nunca existió: la página estaba rota y nadie se había dado cuenta porque el proyecto
+  // al que apuntaba también estaba muerto.
+  fetch(URL_SB + "/rest/v1/puente_vinculos?select=dispositivo,activo&token=eq." + encodeURIComponent(token),
         {headers:{apikey:CLAVE, Authorization:"Bearer " + CLAVE}})
    .then(function(r){ return r.json(); })
    .then(function(j){

@@ -12,6 +12,8 @@
  header{text-align:center;padding:14px 0 18px}
  header h1{margin:0;font-size:19px}
  header p{margin:6px 0 0;color:var(--gris);font-size:14px}
+ #quien{font-size:12.5px;color:#94a3b8;margin-top:3px}
+ #quien b{color:var(--gris)}
  #falla{display:none;background:#fef2f2;border:1px solid #fca5a5;color:#991b1b;
         border-radius:12px;padding:16px;font-size:15px;line-height:1.5}
  #zona{display:none}
@@ -56,6 +58,7 @@
 <header>
   <h1>📄 Enviar comprobante</h1>
   <p id="sub">conectando…</p>
+  <p id="quien"></p>
 </header>
 
 <div id="falla"></div>
@@ -164,7 +167,11 @@ function morir(msg){
   // `puente_vinculos` — el nombre lo usa la app. Acá decía `puente_estado`, una tabla que
   // nunca existió: la página estaba rota y nadie se había dado cuenta porque el proyecto
   // al que apuntaba también estaba muerto.
-  fetch(URL_SB + "/rest/v1/puente_vinculos?select=dispositivo,activo&token=eq." + encodeURIComponent(token),
+  // se pide tambien `usuario` y `pc`: quien sostiene el telefono tiene que poder ver A
+  // NOMBRE DE QUIEN va lo que manda y a que maquina llega. Sin eso, dos personas con el
+  // mismo modelo de celular no pueden saber cual de los dos vinculos tienen abierto
+  // (Fredy, 23/09/2026: "no se sabe qué usuario es el que cargó esa factura").
+  fetch(URL_SB + "/rest/v1/puente_vinculos?select=dispositivo,activo,usuario,pc&token=eq." + encodeURIComponent(token),
         {headers:{apikey:CLAVE, Authorization:"Bearer " + CLAVE}})
    .then(function(r){ return r.json(); })
    .then(function(j){
@@ -177,6 +184,13 @@ function morir(msg){
        return;
      }
      $("sub").textContent = j[0].dispositivo || "celular vinculado";
+     // A nombre de quién van las fotos, y a qué PC llegan. El usuario es el de Expert: la
+     // foto se archiva a nombre de esa persona, no de quien tenga la sesión abierta en la
+     // máquina, así que conviene que quien manda lo vea antes de mandar.
+     var q = [];
+     if(j[0].usuario) q.push("a nombre de <b>" + j[0].usuario.replace(/[<>&]/g, "") + "</b>");
+     if(j[0].pc)      q.push("a la PC " + j[0].pc.replace(/[<>&]/g, ""));
+     if(q.length) $("quien").innerHTML = q.join(" · ");
      $("zona").style.display = "block";
    })
    .catch(function(){
@@ -425,17 +439,38 @@ var _rec = null, _giro = 0, _img = null, _arch = null, _tocando = null;
 function recAbrir(file){
   _arch = file; _giro = 0;
   var ov = $("recOv"), im = $("recImg");
+
+  // LA PANTALLA SE MUESTRA PRIMERO, y no es un detalle de orden.
+  //
+  // Estaba al reves: se cargaba la imagen y despues se mostraba la pantalla. Con una foto
+  // que carga rapido, `onload` se dispara ANTES de que la pantalla sea visible, y ahi
+  // `getBoundingClientRect` devuelve cero. El recuadro quedaba de 0x0 y, como el oscurecido
+  // es una sombra enorme ALREDEDOR del recuadro, sin recuadro la sombra tapaba todo: la
+  // pantalla se veia gris entera y no habia forma de seguir (Fredy, 23/09/2026).
+  ov.style.display = "flex";
+
   im.onload = function(){
     _img = im;
     var d = detectarPapel(im);
     _rec = d || {x:0.05, y:0.05, w:0.90, h:0.90};
     $("recAviso").textContent = d ? "Encontré el documento. Ajustá si hace falta."
                                   : "No pude encontrar el borde. Ajustá el recuadro.";
-    recPintar();
+    // y se espera un cuadro de video a que el navegador acomode la imagen: `onload` dice
+    // que los pixeles llegaron, no que ya tengan lugar y tamaño en la pantalla
+    requestAnimationFrame(function(){ requestAnimationFrame(recPintar); });
+  };
+  im.onerror = function(){
+    $("recAviso").textContent = "No pude abrir esa foto.";
   };
   im.src = URL.createObjectURL(file);
-  ov.style.display = "flex";
 }
+
+// Si se gira el telefono, la imagen cambia de tamaño y el recuadro queda donde estaba:
+// marcando otra parte del papel. Se vuelve a dibujar.
+window.addEventListener("resize", function(){ if(_img) recPintar(); });
+window.addEventListener("orientationchange", function(){
+  setTimeout(function(){ if(_img) recPintar(); }, 250);
+});
 
 function recCerrar(){
   $("recOv").style.display = "none";
@@ -447,6 +482,17 @@ function recPintar(){
   var im = $("recImg"), caja = $("recCaja");
   if(!im || !_rec) return;
   var r = im.getBoundingClientRect(), p = im.parentNode.getBoundingClientRect();
+
+  // RED DE SEGURIDAD: si la imagen todavia no tiene tamaño, no se dibuja el recuadro y se
+  // vuelve a intentar. Sin esto, un recuadro de 0x0 hace que su sombra —que es la que
+  // oscurece lo de afuera— tape la pantalla entera, y el usuario queda trabado mirando
+  // gris. Ya paso una vez; que no dependa de acertar el orden en un solo lugar.
+  if(r.width < 4 || r.height < 4){
+    caja.style.display = "none";
+    setTimeout(recPintar, 120);
+    return;
+  }
+  caja.style.display = "";
   caja.style.left   = (r.left - p.left + _rec.x * r.width) + "px";
   caja.style.top    = (r.top  - p.top  + _rec.y * r.height) + "px";
   caja.style.width  = (_rec.w * r.width) + "px";

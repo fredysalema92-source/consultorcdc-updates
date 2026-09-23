@@ -52,7 +52,7 @@
     sobre la foto: todo lo que se arrastraba quedaba corrido (Fredy, 23/09/2026).
     Con solo max-width y max-height, el navegador achica la imagen respetando la proporcion
     y el elemento mide EXACTAMENTE lo que se ve. Las cuentas vuelven a cerrar. */
- #recImg{max-width:100%;max-height:100%;display:block}
+ #recLienzo{max-width:100%;max-height:100%;display:block}
  /* el SVG se apoya exactamente sobre la foto */
  #recSvg{position:absolute;pointer-events:none}
  /* las manijas son grandes a proposito: 15 px de radio es lo minimo que se agarra con el
@@ -82,7 +82,10 @@
 
 <div id="recOv">
   <div id="recCont">
-    <img id="recImg" alt="">
+    <!-- un LIENZO y no una imagen: girar pasa a ser volver a pintar, sin recomprimir ni
+         recargar nada. Ver `recDibujarFoto`. -->
+    <canvas id="recLienzo"></canvas>
+    <img id="recImg" alt="" style="display:none">
     <!-- El recorte es un CUADRILATERO, no un rectangulo: una factura fotografiada desde
          arriba en angulo se ve como un trapecio, y un rectangulo nunca puede seguir sus
          bordes. Por eso se dibuja en SVG y no con un div, que solo sabe hacer rectangulos.
@@ -596,7 +599,10 @@ function mandar(file, rec, giro){
 // Las cuatro esquinas, en proporciones de 0 a 1 y SIEMPRE en este orden:
 //     0 arriba-izquierda   1 arriba-derecha   2 abajo-derecha   3 abajo-izquierda
 // El orden importa: es el que usa el enderezado para saber cual lado es cual.
-var _pts = null, _giro = 0, _img = null, _arch = null, _tocando = -1;
+var _pts = null, _giro = 0, _arch = null, _tocando = -1;
+// _orig es la foto ORIGINAL, sin girar ni achicar: de ella sale el recorte final, asi que
+// nunca se le toca la calidad. Lo que se ve en pantalla es un lienzo mas chico.
+var _orig = null;
 
 function _deRect(r){
   return [{x:r.x, y:r.y}, {x:r.x + r.w, y:r.y},
@@ -617,10 +623,13 @@ function recAbrir(file){
   ov.style.display = "flex";
 
   im.onload = function(){
-    _img = im;
+    // `_orig` guarda la foto ENTERA, sin girar ni achicar: de ella sale el recorte final.
+    // En pantalla se dibuja un lienzo más chico, que es lo que se ve y lo que se mide.
+    _orig = im;
+    recDibujarFoto();
     // Se arranca en el PASO 1 (girar). Las esquinas se calculan recién al pasar al 2,
     // sobre la foto ya enderezada.
-    // y se espera un cuadro de video a que el navegador acomode la imagen: `onload` dice
+    // y se espera un cuadro de video a que el navegador acomode el lienzo: `onload` dice
     // que los pixeles llegaron, no que ya tengan lugar y tamaño en la pantalla
     requestAnimationFrame(function(){ requestAnimationFrame(function(){ recPaso(1); }); });
   };
@@ -646,7 +655,7 @@ function recPaso(p){
     return;
   }
   // al entrar al paso 2 se busca el papel sobre la foto YA enderezada
-  var d = _img ? detectarPapel(_img) : null;
+  var d = _orig ? detectarPapel($("recLienzo")) : null;
   // Cuando NO detecta, el recuadro arranca al 80% y no al 90%: asi las manijas quedan bien
   // adentro de la foto y se agarran con el dedo. Al 90% quedaban pegadas al borde —y con la
   // barra del navegador encima— casi imposibles de tocar.
@@ -660,19 +669,19 @@ function recPaso(p){
 
 // Si se gira el telefono, la imagen cambia de tamaño y el recuadro queda donde estaba:
 // marcando otra parte del papel. Se vuelve a dibujar.
-window.addEventListener("resize", function(){ if(_img) recPintar(); });
+window.addEventListener("resize", function(){ if(_orig){ recDibujarFoto(); if(_pts) recPintar(); } });
 window.addEventListener("orientationchange", function(){
-  setTimeout(function(){ if(_img) recPintar(); }, 250);
+  setTimeout(function(){ if(_orig){ recDibujarFoto(); if(_pts) recPintar(); } }, 250);
 });
 
 function recCerrar(){
   $("recOv").style.display = "none";
-  if(_img && _img.src) URL.revokeObjectURL(_img.src);
-  _img = null; _arch = null;
+  if(_orig && _orig.src) URL.revokeObjectURL(_orig.src);
+  _orig = null; _arch = null;
 }
 
 function recPintar(){
-  var im = $("recImg"), svg = $("recSvg");
+  var im = $("recLienzo"), svg = $("recSvg");
   if(!im || !_pts || !svg) return;
   var r = im.getBoundingClientRect(), p = im.parentNode.getBoundingClientRect();
 
@@ -758,15 +767,7 @@ function recGirar(){
   // caja que lo envuelve, no el rectangulo girado, asi que TODAS las cuentas quedaban mal.
   // Dibujando la imagen ya girada en un lienzo, lo que se ve ES la imagen: las coordenadas
   // vuelven a ser directas y desaparece toda esa clase de errores.
-  if(!_img) return;
-  var w = _img.naturalWidth || _img.width, h = _img.naturalHeight || _img.height;
-  var c = document.createElement("canvas");
-  c.width = h; c.height = w;                       // 90 grados: se dan vuelta los lados
-  var cx = c.getContext("2d");
-  cx.translate(h / 2, w / 2);
-  cx.rotate(Math.PI / 2);
-  cx.drawImage(_img, -w / 2, -h / 2);
-
+  if(!_orig) return;
   _giro = (_giro + 90) % 360;
   // Las esquinas solo existen en el PASO 2: en el 1 todavia no se marcaron.
   //
@@ -782,11 +783,38 @@ function recGirar(){
     _pts = [g[3], g[0], g[1], g[2]].map(_acotarPunto);
   }
 
-  var im = $("recImg");
-  im.onload = function(){ requestAnimationFrame(function(){ if(_pts) recPintar(); }); };
-  im.src = c.toDataURL("image/jpeg", 0.92);
-  // a partir de ahora el original ES el girado: lo que se ve y lo que se envia coinciden
-  _img = im;
+  recDibujarFoto();
+  if(_pts) recPintar();
+}
+
+// Dibuja la foto —ya girada— en el lienzo que se ve en pantalla.
+//
+// ANTES ESTO RECOMPRIMIA LA FOTO ENTERA en cada giro: se dibujaba en un lienzo, se pasaba a
+// JPEG con `toDataURL` y se volvia a cargar como imagen. Con una foto de celular de 12
+// megapixeles eso son varios segundos, y encima pierde calidad en cada vuelta
+// (Fredy, 23/09/2026: "antes girar no era lento, ahora es super lento").
+//
+// Dibujando en un lienzo no hay nada que comprimir ni que recargar: girar es volver a
+// pintar. Y como lo que se ve ES el lienzo, las coordenadas siguen siendo directas, que era
+// lo que se habia ganado al dejar de rotar con CSS.
+//
+// El lienzo se dibuja a lo sumo a 1400 px: es lo que entra en una pantalla de celular, y
+// pintar 12 megapixeles para mostrar uno y medio es trabajo tirado. El recorte final se
+// hace sobre la foto ORIGINAL, asi que no se pierde nada de calidad.
+function recDibujarFoto(){
+  if(!_orig) return;
+  var W = _orig.naturalWidth, H = _orig.naturalHeight;
+  var vuelta = (_giro === 90 || _giro === 270);
+  var aw = vuelta ? H : W, ah = vuelta ? W : H;
+  var esc = Math.min(1, 1400 / Math.max(aw, ah));
+  var c = $("recLienzo");
+  c.width = Math.round(aw * esc); c.height = Math.round(ah * esc);
+  var cx = c.getContext("2d");
+  cx.save();
+  cx.translate(c.width / 2, c.height / 2);
+  cx.rotate(_giro * Math.PI / 180);
+  cx.drawImage(_orig, -W * esc / 2, -H * esc / 2, W * esc, H * esc);
+  cx.restore();
 }
 
 function recTodo(){ _pts = _deRect({x:0, y:0, w:1, h:1}); recPintar(); }
@@ -807,7 +835,7 @@ function recTomar(ev, i){
   // Hacerlo en cada movimiento obligaba al navegador a recalcular la posicion de todo
   // (`getBoundingClientRect` fuerza ese recalculo) sesenta veces por segundo, para
   // enterarse de algo que no habia cambiado.
-  var caja = $("recImg").getBoundingClientRect();
+  var caja = $("recLienzo").getBoundingClientRect();
   var pendiente = false;
 
   function mover(e){
@@ -861,3 +889,4 @@ $("galeria").onchange = function(){ tomar(this); };
 </script>
 </body>
 </html>
+

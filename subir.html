@@ -45,7 +45,14 @@
     con el dedo (Fredy, 23/09/2026: "tiene muchos errores aún") */
  #recCont{position:relative;flex:1;display:flex;align-items:center;justify-content:center;
           min-height:0;padding:20px}
- #recImg{max-width:100%;max-height:100%;object-fit:contain;display:block}
+ /* SIN `object-fit`, y es la diferencia entre que ande y que no.
+    Con `object-fit:contain` el ELEMENTO ocupa todo el espacio disponible pero la IMAGEN
+    adentro queda achicada y centrada, con franjas vacias arriba y abajo. Como las
+    coordenadas se miden sobre el elemento, las esquinas caian en esas franjas en vez de
+    sobre la foto: todo lo que se arrastraba quedaba corrido (Fredy, 23/09/2026).
+    Con solo max-width y max-height, el navegador achica la imagen respetando la proporcion
+    y el elemento mide EXACTAMENTE lo que se ve. Las cuentas vuelven a cerrar. */
+ #recImg{max-width:100%;max-height:100%;display:block}
  /* el SVG se apoya exactamente sobre la foto */
  #recSvg{position:absolute;pointer-events:none}
  /* las manijas son grandes a proposito: 15 px de radio es lo minimo que se agarra con el
@@ -80,21 +87,35 @@
          arriba en angulo se ve como un trapecio, y un rectangulo nunca puede seguir sus
          bordes. Por eso se dibuja en SVG y no con un div, que solo sabe hacer rectangulos.
          Las cuatro esquinas se mueven sueltas, y al enviar se endereza. -->
+    <!-- El oscurecido es UN SOLO CAMINO con regla par-impar: el rectangulo de afuera y el
+         cuadrilatero adentro, que queda como agujero. Antes era una MASCARA SVG, y una
+         mascara obliga al navegador a recomponer toda la superficie de la imagen en cada
+         cambio. En una PC no se nota; en un celular, con la foto a pantalla completa y
+         moviendose con el dedo, era lo que hacia que el arrastre fuera lento
+         (Fredy, 23/09/2026: "por qué el recorte es tan lento, si en teoría es seguir las
+         coordenadas de los dedos nada más"). Un relleno comun no recompone nada. -->
     <svg id="recSvg">
-      <defs><mask id="recMask">
-        <rect x="0" y="0" width="100%" height="100%" fill="#fff"/>
-        <polygon id="recHueco" points="" fill="#000"/>
-      </mask></defs>
-      <rect x="0" y="0" width="100%" height="100%" fill="rgba(15,23,42,.62)" mask="url(#recMask)"/>
+      <path id="recSombra" d="" fill="rgba(15,23,42,.62)" fill-rule="evenodd"/>
       <polygon id="recBorde" points="" fill="none" stroke="#38bdf8" stroke-width="2.5"/>
       <g id="recManijas"></g>
     </svg>
   </div>
   <p id="recAviso"></p>
-  <div id="recPie">
+  <!-- DOS PASOS, no uno. Primero se endereza la foto, después se marcan las esquinas.
+       Pedido de Fredy (23/09/2026): "girar la imagen que sea primero, ajustar después,
+       o sea recortar después, no juntos". Además simplifica: si se gira antes de marcar,
+       las esquinas no tienen que seguir al giro — ese problema desaparece. -->
+  <div id="recPaso1">
+    <button class="btn" onclick="recPaso(2)">Siguiente ›</button>
+    <div style="display:flex;gap:9px;margin-top:9px">
+      <button class="btn sec" style="margin:0;flex:1" onclick="recGirar()">↻ Girar</button>
+      <button class="btn sec" style="margin:0" onclick="recCerrar();recSiguiente()">✕</button>
+    </div>
+  </div>
+  <div id="recPaso2" style="display:none">
     <button class="btn" onclick="recEnviar()">✓ Enviar</button>
     <div style="display:flex;gap:9px;margin-top:9px">
-      <button class="btn sec" style="margin:0" onclick="recGirar()">↻ Girar</button>
+      <button class="btn sec" style="margin:0" onclick="recPaso(1)">‹ Atrás</button>
       <button class="btn sec" style="margin:0" onclick="recReiniciar()">⟲ Reiniciar</button>
       <button class="btn sec" style="margin:0" onclick="recTodo()">⬜ Todo</button>
       <button class="btn sec" style="margin:0" onclick="recCerrar();recSiguiente()">✕</button>
@@ -159,6 +180,23 @@ if (_h.indexOf("=") >= 0) {
 var n = 0;
 
 function $(id){ return document.getElementById(id); }
+
+// UN ERROR DE JAVASCRIPT NO PUEDE QUEDAR INVISIBLE.
+//
+// El 23/09/2026 el botón Girar reventaba y no pasaba NADA: ni se giraba, ni aparecía un
+// aviso. Desde afuera parecía que el botón no hacía nada, y Fredy estuvo probando un rato
+// sin forma de saber qué pasaba — el error solo se veía abriendo la consola del navegador,
+// que nadie va a hacer con el teléfono en la mano en una obra.
+//
+// Ahora cualquier error suelto se muestra en pantalla. No lo arregla, pero convierte «no
+// funciona» en algo que se puede contar y buscar.
+window.addEventListener("error", function(ev){
+  try{
+    var a = $("recAviso");
+    if(a) a.innerHTML = '<span style="color:#fca5a5">Algo falló: '
+      + String((ev.error && ev.error.message) || ev.message).slice(0, 90) + '</span>';
+  }catch(e){}
+});
 
 function morir(msg){
   $("sub").textContent = "";
@@ -580,23 +618,44 @@ function recAbrir(file){
 
   im.onload = function(){
     _img = im;
-    var d = detectarPapel(im);
-    // Cuando NO detecta, el recuadro arranca al 80% y no al 90%: asi las manijas quedan
-    // bien adentro de la foto y se agarran con el dedo. Al 90% quedaban pegadas al borde
-    // —y con la barra del navegador encima— casi imposibles de tocar (Fredy, 23/09/2026).
-    // acotado también acá: la detección le suma un respiro de 1,5% a cada lado y eso, con
-    // un papel que ya llegaba al borde, se pasa de la foto
-    _pts = _deRect(recAcotar(d || {x:0.10, y:0.10, w:0.80, h:0.80}));
-    $("recAviso").textContent = d ? "Encontré el documento. Ajustá si hace falta."
-                                  : "Arrastrá las esquinas hasta el borde de la factura.";
+    // Se arranca en el PASO 1 (girar). Las esquinas se calculan recién al pasar al 2,
+    // sobre la foto ya enderezada.
     // y se espera un cuadro de video a que el navegador acomode la imagen: `onload` dice
     // que los pixeles llegaron, no que ya tengan lugar y tamaño en la pantalla
-    requestAnimationFrame(function(){ requestAnimationFrame(recPintar); });
+    requestAnimationFrame(function(){ requestAnimationFrame(function(){ recPaso(1); }); });
   };
   im.onerror = function(){
     $("recAviso").textContent = "No pude abrir esa foto.";
   };
   im.src = URL.createObjectURL(file);
+}
+
+// PASO 1: enderezar.  PASO 2: marcar las esquinas.
+//
+// Separarlos fue idea de Fredy y ademas arregla de raiz un error: cuando girar y recortar
+// convivian, cada giro tenia que arrastrar las cuatro esquinas con el, y bastaba una cuenta
+// mal para que el recuadro terminara marcando otra parte del papel. Ahora, cuando aparecen
+// las esquinas, la foto ya esta derecha y no se mueve mas.
+function recPaso(p){
+  _paso = p;
+  $("recPaso1").style.display = (p === 1) ? "" : "none";
+  $("recPaso2").style.display = (p === 2) ? "" : "none";
+  $("recSvg").style.display   = (p === 2) ? "" : "none";
+  if(p === 1){
+    $("recAviso").textContent = "¿Está derecha? Si no, girala. Después ajustás el recorte.";
+    return;
+  }
+  // al entrar al paso 2 se busca el papel sobre la foto YA enderezada
+  var d = _img ? detectarPapel(_img) : null;
+  // Cuando NO detecta, el recuadro arranca al 80% y no al 90%: asi las manijas quedan bien
+  // adentro de la foto y se agarran con el dedo. Al 90% quedaban pegadas al borde —y con la
+  // barra del navegador encima— casi imposibles de tocar.
+  // Acotado tambien aca: la deteccion le suma un respiro de 1,5% a cada lado y eso, con un
+  // papel que ya llegaba al borde, se pasa de la foto.
+  _pts = _deRect(recAcotar(d || {x:0.10, y:0.10, w:0.80, h:0.80}));
+  $("recAviso").textContent = d ? "Encontré el documento. Ajustá si hace falta."
+                                : "Arrastrá las esquinas hasta el borde de la factura.";
+  recPintar();
 }
 
 // Si se gira el telefono, la imagen cambia de tamaño y el recuadro queda donde estaba:
@@ -631,11 +690,16 @@ function recPintar(){
   svg.setAttribute("width", r.width);
   svg.setAttribute("height", r.height);
 
-  var pts = _pts.map(function(q){
-    return (q.x * r.width).toFixed(1) + "," + (q.y * r.height).toFixed(1);
-  }).join(" ");
-  $("recHueco").setAttribute("points", pts);
-  $("recBorde").setAttribute("points", pts);
+  var xy = _pts.map(function(q){
+    return [(q.x * r.width).toFixed(1), (q.y * r.height).toFixed(1)];
+  });
+  $("recBorde").setAttribute("points", xy.map(function(a){ return a.join(","); }).join(" "));
+  // el rectangulo de afuera y el cuadrilatero adentro, en un solo camino: con par-impar el
+  // segundo queda como agujero del primero
+  $("recSombra").setAttribute("d",
+    "M0 0H" + r.width.toFixed(1) + "V" + r.height.toFixed(1) + "H0Z " +
+    "M" + xy[0].join(" ") + "L" + xy[1].join(" ") + "L" + xy[2].join(" ") +
+    "L" + xy[3].join(" ") + "Z");
 
   // LAS MANIJAS SE CREAN UNA SOLA VEZ y despues solo se les mueve el centro.
   //
@@ -704,14 +768,22 @@ function recGirar(){
   cx.drawImage(_img, -w / 2, -h / 2);
 
   _giro = (_giro + 90) % 360;
-  // cada esquina acompaña: (x,y) -> (1-y, x). Y se rota la LISTA para que el orden siga
-  // siendo arriba-izquierda, arriba-derecha, abajo-derecha, abajo-izquierda — si no, el
-  // enderezado tomaria por "ancho" lo que ahora es el alto y saldria acostado.
-  var g = _pts.map(function(q){ return {x: 1 - q.y, y: q.x}; });
-  _pts = [g[3], g[0], g[1], g[2]].map(_acotarPunto);
+  // Las esquinas solo existen en el PASO 2: en el 1 todavia no se marcaron.
+  //
+  // Sin este `if`, el boton Girar reventaba con "Cannot read properties of null" y no hacia
+  // NADA VISIBLE —un error de JavaScript no avisa al usuario—, que es exactamente lo que
+  // Fredy veia: "no recorta, no gira" (23/09/2026). Lo rompi yo al separar en dos pasos y
+  // mover ahi la creacion de las esquinas.
+  if(_pts){
+    // cada esquina acompaña: (x,y) -> (1-y, x). Y se rota la LISTA para que el orden siga
+    // siendo arriba-izquierda, arriba-derecha, abajo-derecha, abajo-izquierda — si no, el
+    // enderezado tomaria por "ancho" lo que ahora es el alto y saldria acostado.
+    var g = _pts.map(function(q){ return {x: 1 - q.y, y: q.x}; });
+    _pts = [g[3], g[0], g[1], g[2]].map(_acotarPunto);
+  }
 
   var im = $("recImg");
-  im.onload = function(){ requestAnimationFrame(recPintar); };
+  im.onload = function(){ requestAnimationFrame(function(){ if(_pts) recPintar(); }); };
   im.src = c.toDataURL("image/jpeg", 0.92);
   // a partir de ahora el original ES el girado: lo que se ve y lo que se envia coinciden
   _img = im;
@@ -731,14 +803,26 @@ function _acotarPunto(q){
 // rectangulo al lado de un trapecio).
 function recTomar(ev, i){
   ev.preventDefault(); ev.stopPropagation(); _tocando = i;
+  // La imagen no se mueve mientras se arrastra, asi que medirla una sola vez alcanza.
+  // Hacerlo en cada movimiento obligaba al navegador a recalcular la posicion de todo
+  // (`getBoundingClientRect` fuerza ese recalculo) sesenta veces por segundo, para
+  // enterarse de algo que no habia cambiado.
+  var caja = $("recImg").getBoundingClientRect();
+  var pendiente = false;
+
   function mover(e){
     if(_tocando < 0 || !_pts) return;
     if(e.cancelable) e.preventDefault();
     var t = (e.touches && e.touches[0]) || e;
-    var r = $("recImg").getBoundingClientRect();
-    _pts[_tocando] = _acotarPunto({x: (t.clientX - r.left) / r.width,
-                                   y: (t.clientY - r.top)  / r.height});
-    recPintar();
+    _pts[_tocando] = _acotarPunto({x: (t.clientX - caja.left) / caja.width,
+                                   y: (t.clientY - caja.top)  / caja.height});
+    // Se dibuja UNA VEZ POR CUADRO DE VIDEO, no una por evento. El dedo genera eventos mas
+    // rapido de lo que la pantalla puede mostrar, asi que dibujar en cada uno es trabajo
+    // que nadie llega a ver — y es parte de por que se sentia lento.
+    if(!pendiente){
+      pendiente = true;
+      requestAnimationFrame(function(){ pendiente = false; recPintar(); });
+    }
   }
   function soltar(){
     _tocando = -1;

@@ -350,7 +350,8 @@ function _homografia(dst, src){
 }
 
 function _enderezar(img, pts, anchoMax){
-  var W = img.naturalWidth, H = img.naturalHeight;
+  // acepta una imagen o un lienzo: al girar, la fuente pasa a ser un lienzo
+  var W = img.naturalWidth || img.width, H = img.naturalHeight || img.height;
   var src = pts.map(function(q){ return {x: q.x * W, y: q.y * H}; });
   function largo(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
   // el rectangulo de salida toma el lado MAS LARGO de cada par: asi no se pierde detalle
@@ -394,6 +395,23 @@ function achicar(file, rec, giro){
     var img = new Image(), url = URL.createObjectURL(file);
     img.onload = function(){
       var c, cw, ch;
+      // EL GIRO VA PRIMERO, y ese orden no es opcional: las cuatro esquinas se marcaron
+      // sobre la foto YA GIRADA en la pantalla, asi que si se recortara antes de girar
+      // apuntarian a otra parte del papel. Antes se giraba al final y por eso no coincidia.
+      var _g = ((giro || 0) % 360 + 360) % 360;
+      var fuente = img;
+      if(_g){
+        var W0 = img.naturalWidth, H0 = img.naturalHeight;
+        var vuelta0 = (_g === 90 || _g === 270);
+        var cg = document.createElement("canvas");
+        cg.width  = vuelta0 ? H0 : W0;
+        cg.height = vuelta0 ? W0 : H0;
+        var cgx = cg.getContext("2d");
+        cgx.translate(cg.width / 2, cg.height / 2);
+        cgx.rotate(_g * Math.PI / 180);
+        cgx.drawImage(img, -W0 / 2, -H0 / 2);
+        fuente = cg;
+      }
       // `rec` son las CUATRO ESQUINAS. Si no forman un rectangulo —la factura estaba en
       // angulo— se endereza; si lo forman, alcanza con recortar, que es mucho mas rapido.
       var derecho = rec && Math.abs(rec[0].y - rec[1].y) < 0.004 &&
@@ -401,11 +419,11 @@ function achicar(file, rec, giro){
                     Math.abs(rec[0].x - rec[3].x) < 0.004 &&
                     Math.abs(rec[1].x - rec[2].x) < 0.004;
       if(rec && !derecho){
-        c = _enderezar(img, rec, LADO);
+        c = _enderezar(fuente, rec, LADO);
         if(c){ cw = c.width; ch = c.height; }
       }
       if(!c){
-        var W = img.naturalWidth, H = img.naturalHeight;
+        var W = fuente.naturalWidth || fuente.width, H = fuente.naturalHeight || fuente.height;
         var sx = 0, sy = 0, sw = W, sh = H;
         if(rec){
           var xs = rec.map(function(q){ return q.x; }), ys = rec.map(function(q){ return q.y; });
@@ -418,21 +436,7 @@ function achicar(file, rec, giro){
         cw = Math.round(sw * esc); ch = Math.round(sh * esc);
         c = document.createElement("canvas");
         c.width = cw; c.height = ch;
-        c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
-      }
-      // el giro va DESPUES de enderezar: son dos cosas distintas y mezclarlas complica las
-      // cuentas sin ganar nada
-      var g = ((giro || 0) % 360 + 360) % 360;
-      if(g){
-        var vuelta = (g === 90 || g === 270);
-        var c2 = document.createElement("canvas");
-        c2.width  = vuelta ? ch : cw;
-        c2.height = vuelta ? cw : ch;
-        var cx2 = c2.getContext("2d");
-        cx2.translate(c2.width / 2, c2.height / 2);
-        cx2.rotate(g * Math.PI / 180);
-        cx2.drawImage(c, -cw / 2, -ch / 2);
-        c = c2; cw = c2.width; ch = c2.height;
+        c.getContext("2d").drawImage(fuente, sx, sy, sw, sh, 0, 0, cw, ch);
       }
       URL.revokeObjectURL(url);
       c.toBlob(function(b){
@@ -633,18 +637,31 @@ function recPintar(){
   $("recHueco").setAttribute("points", pts);
   $("recBorde").setAttribute("points", pts);
 
-  var g = $("recManijas"), h = "";
+  // LAS MANIJAS SE CREAN UNA SOLA VEZ y despues solo se les mueve el centro.
+  //
+  // Antes se rehacian con innerHTML en cada redibujado, o sea SESENTA VECES POR SEGUNDO
+  // mientras se arrastra: se estaba destruyendo y recreando el mismo circulo que el dedo
+  // tenia agarrado, y con el se perdian sus eventos. De ahi que fuera lento y que el
+  // arrastre se cortara solo (Fredy, 23/09/2026: "es muy lento y no responde").
+  var g = $("recManijas");
+  if(g.childNodes.length !== 4){
+    g.innerHTML = "";
+    _pts.forEach(function(q, i){
+      var c = document.createElementNS("http://www.w3.org/2000/svg", "circle");
+      c.setAttribute("r", "15");
+      c.setAttribute("fill", "#38bdf8");
+      c.setAttribute("stroke", "#fff");
+      c.setAttribute("stroke-width", "2.5");
+      c.addEventListener("touchstart", function(e){ recTomar(e, i); }, {passive:false});
+      c.addEventListener("mousedown",  function(e){ recTomar(e, i); });
+      g.appendChild(c);
+    });
+  }
   _pts.forEach(function(q, i){
-    h += '<circle cx="' + (q.x * r.width).toFixed(1) + '" cy="' + (q.y * r.height).toFixed(1)
-       + '" r="15" fill="#38bdf8" stroke="#fff" stroke-width="2.5" data-i="' + i + '"></circle>';
+    var c = g.childNodes[i];
+    c.setAttribute("cx", (q.x * r.width).toFixed(1));
+    c.setAttribute("cy", (q.y * r.height).toFixed(1));
   });
-  g.innerHTML = h;
-  Array.prototype.forEach.call(g.querySelectorAll("circle"), function(c){
-    var i = +c.getAttribute("data-i");
-    c.addEventListener("touchstart", function(e){ recTomar(e, i); }, {passive:false});
-    c.addEventListener("mousedown",  function(e){ recTomar(e, i); });
-  });
-  im.style.transform = "rotate(" + _giro + "deg)";
 }
 
 // EL RECUADRO NO PUEDE SALIRSE DE LA FOTO, NUNCA.
@@ -667,13 +684,37 @@ function recAcotar(r){
 }
 
 function recGirar(){
+  // SE GIRA LA IMAGEN DE VERDAD, no con CSS.
+  //
+  // Antes se le ponia `transform: rotate()` al <img> y se seguian midiendo las coordenadas
+  // sobre la imagen SIN rotar. Resultado: la foto se veia dada vuelta y el recuadro quedaba
+  // donde estaba antes, marcando cualquier cosa (Fredy, 23/09/2026, con la captura).
+  //
+  // El problema de fondo es que `getBoundingClientRect` de un elemento rotado devuelve la
+  // caja que lo envuelve, no el rectangulo girado, asi que TODAS las cuentas quedaban mal.
+  // Dibujando la imagen ya girada en un lienzo, lo que se ve ES la imagen: las coordenadas
+  // vuelven a ser directas y desaparece toda esa clase de errores.
+  if(!_img) return;
+  var w = _img.naturalWidth || _img.width, h = _img.naturalHeight || _img.height;
+  var c = document.createElement("canvas");
+  c.width = h; c.height = w;                       // 90 grados: se dan vuelta los lados
+  var cx = c.getContext("2d");
+  cx.translate(h / 2, w / 2);
+  cx.rotate(Math.PI / 2);
+  cx.drawImage(_img, -w / 2, -h / 2);
+
   _giro = (_giro + 90) % 360;
-  // Cada esquina gira con la foto: (x,y) -> (1-y, x). Y se ROTA LA LISTA para que el orden
-  // siga siendo arriba-izquierda, arriba-derecha, abajo-derecha, abajo-izquierda: si no, el
+  // cada esquina acompaña: (x,y) -> (1-y, x). Y se rota la LISTA para que el orden siga
+  // siendo arriba-izquierda, arriba-derecha, abajo-derecha, abajo-izquierda — si no, el
   // enderezado tomaria por "ancho" lo que ahora es el alto y saldria acostado.
   var g = _pts.map(function(q){ return {x: 1 - q.y, y: q.x}; });
   _pts = [g[3], g[0], g[1], g[2]].map(_acotarPunto);
-  recPintar();
+
+  var im = $("recImg");
+  im.onload = function(){ requestAnimationFrame(recPintar); };
+  im.src = c.toDataURL("image/jpeg", 0.92);
+  // a partir de ahora el original ES el girado: lo que se ve y lo que se envia coinciden
+  _img = im;
 }
 
 function recTodo(){ _pts = _deRect({x:0, y:0, w:1, h:1}); recPintar(); }

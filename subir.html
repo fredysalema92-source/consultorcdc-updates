@@ -39,16 +39,18 @@
     necesita la foto lo mas grande posible */
  #recOv{display:none;position:fixed;inset:0;background:#0f172a;z-index:9000;
         flex-direction:column;padding:12px}
+ /* el hueco de 20 px es para las MANIJAS: quedan centradas en cada esquina, o sea que la
+    mitad cae fuera del recuadro. Sin este hueco, un recorte que llega al borde de la foto
+    deja las manijas medio cortadas contra el filo de la pantalla y no se pueden agarrar
+    con el dedo (Fredy, 23/09/2026: "tiene muchos errores aún") */
  #recCont{position:relative;flex:1;display:flex;align-items:center;justify-content:center;
-          min-height:0}
+          min-height:0;padding:20px}
  #recImg{max-width:100%;max-height:100%;object-fit:contain;display:block}
- #recCaja{position:absolute;border:2px solid #38bdf8;box-shadow:0 0 0 9999px rgba(15,23,42,.62)}
- /* las manijas son grandes a proposito: 30 px es lo minimo que se agarra con el
+ /* el SVG se apoya exactamente sobre la foto */
+ #recSvg{position:absolute;pointer-events:none}
+ /* las manijas son grandes a proposito: 15 px de radio es lo minimo que se agarra con el
     dedo sin tener que apuntar, y esto se usa parado en una obra */
- #recCaja .m{position:absolute;width:30px;height:30px;background:#38bdf8;border-radius:50%;
-             border:2px solid #fff}
- #recCaja .ia{left:-15px;top:-15px}   #recCaja .da{right:-15px;top:-15px}
- #recCaja .ib{left:-15px;bottom:-15px} #recCaja .db{right:-15px;bottom:-15px}
+ #recManijas circle{pointer-events:all;cursor:grab;touch-action:none}
  #recAviso{color:#cbd5e1;text-align:center;font-size:13.5px;margin:10px 0 0}
  #recPie{padding-top:10px}
 </style>
@@ -74,19 +76,27 @@
 <div id="recOv">
   <div id="recCont">
     <img id="recImg" alt="">
-    <div id="recCaja">
-      <i class="m ia" ontouchstart="recTomar(event,'ia')" onmousedown="recTomar(event,'ia')"></i>
-      <i class="m da" ontouchstart="recTomar(event,'da')" onmousedown="recTomar(event,'da')"></i>
-      <i class="m ib" ontouchstart="recTomar(event,'ib')" onmousedown="recTomar(event,'ib')"></i>
-      <i class="m db" ontouchstart="recTomar(event,'db')" onmousedown="recTomar(event,'db')"></i>
-    </div>
+    <!-- El recorte es un CUADRILATERO, no un rectangulo: una factura fotografiada desde
+         arriba en angulo se ve como un trapecio, y un rectangulo nunca puede seguir sus
+         bordes. Por eso se dibuja en SVG y no con un div, que solo sabe hacer rectangulos.
+         Las cuatro esquinas se mueven sueltas, y al enviar se endereza. -->
+    <svg id="recSvg">
+      <defs><mask id="recMask">
+        <rect x="0" y="0" width="100%" height="100%" fill="#fff"/>
+        <polygon id="recHueco" points="" fill="#000"/>
+      </mask></defs>
+      <rect x="0" y="0" width="100%" height="100%" fill="rgba(15,23,42,.62)" mask="url(#recMask)"/>
+      <polygon id="recBorde" points="" fill="none" stroke="#38bdf8" stroke-width="2.5"/>
+      <g id="recManijas"></g>
+    </svg>
   </div>
   <p id="recAviso"></p>
   <div id="recPie">
     <button class="btn" onclick="recEnviar()">✓ Enviar</button>
     <div style="display:flex;gap:9px;margin-top:9px">
       <button class="btn sec" style="margin:0" onclick="recGirar()">↻ Girar</button>
-      <button class="btn sec" style="margin:0" onclick="recTodo()">⬜ Toda la foto</button>
+      <button class="btn sec" style="margin:0" onclick="recReiniciar()">⟲ Reiniciar</button>
+      <button class="btn sec" style="margin:0" onclick="recTodo()">⬜ Todo</button>
       <button class="btn sec" style="margin:0" onclick="recCerrar();recSiguiente()">✕</button>
     </div>
   </div>
@@ -275,7 +285,12 @@ function detectarPapel(img){
 
     // ¿es creible? Si no, se devuelve null y manda el recuadro al 90%.
     if(aw < 0.25 || ah < 0.25) return null;          // demasiado chico: no era el papel
-    if(aw > 0.97 && ah > 0.97) return null;          // toda la foto: no detectó nada
+    // Basta con que se pase en UN lado. Decia `&&` —tenia que pasarse de ancho Y de alto—
+    // y por eso el 23/09/2026 marco casi toda una foto donde la factura estaba sobre una
+    // pila de papeles blancos: ocupo el 100% del ancho y el 70% del alto, asi que la
+    // condicion no se cumplia y propuso un recuadro inservible. Un recorte que abarca casi
+    // todo no recorta nada; mas vale abstenerse.
+    if(aw > 0.93 || ah > 0.93) return null;
     var prop = (aw * img.naturalWidth) / (ah * img.naturalHeight);
     if(prop < 0.25 || prop > 4) return null;         // una tira: casi seguro es un reflejo
 
@@ -290,33 +305,135 @@ function detectarPapel(img){
 // ---- achicar la foto (con el recorte ya elegido, si lo hay) ----
 // `rec` viene en proporciones (0 a 1) y no en pixeles: asi el recorte que se
 // eligio mirando la vista chica vale igual sobre la foto original, sin cuentas.
+// ---------------------------------------------------------------------------
+// ENDEREZAR EL TRAPECIO
+//
+// Una factura fotografiada en angulo no es un rectangulo: es un trapecio. Recortarla con un
+// rectangulo deja mesa adentro y come esquinas del papel. Y el texto queda deformado, que
+// es lo que de verdad importa: tanto Gemini como el lector local leen peor un renglon que
+// se va achicando hacia un lado.
+//
+// Lo que hace: encuentra la transformacion que lleva las cuatro esquinas que marcaste a las
+// cuatro esquinas de un rectangulo, y despues, para cada pixel del resultado, va a buscar
+// de donde sale en la foto original. Se recorre el DESTINO y no el origen a proposito: asi
+// no quedan huecos sin pintar.
+//
+// Cuesta: unos 4 millones de pixeles para una foto de 2000 px. En un celular, uno o dos
+// segundos, por eso se avisa "enderezando".
+// ---------------------------------------------------------------------------
+function _homografia(dst, src){
+  // Encuentra los 8 numeros que definen la transformacion, resolviendo el sistema de 8
+  // ecuaciones que sale de emparejar 4 puntos con 4 puntos (eliminacion de Gauss).
+  var A = [], b = [];
+  for(var i = 0; i < 4; i++){
+    var X = dst[i].x, Y = dst[i].y, u = src[i].x, v = src[i].y;
+    A.push([X, Y, 1, 0, 0, 0, -X * u, -Y * u]); b.push(u);
+    A.push([0, 0, 0, X, Y, 1, -X * v, -Y * v]); b.push(v);
+  }
+  for(var c = 0; c < 8; c++){
+    var mej = c;
+    for(var r2 = c + 1; r2 < 8; r2++) if(Math.abs(A[r2][c]) > Math.abs(A[mej][c])) mej = r2;
+    var t = A[c]; A[c] = A[mej]; A[mej] = t;
+    var tb = b[c]; b[c] = b[mej]; b[mej] = tb;
+    if(Math.abs(A[c][c]) < 1e-12) return null;      // cuadrilatero degenerado
+    for(var r3 = 0; r3 < 8; r3++){
+      if(r3 === c) continue;
+      var f = A[r3][c] / A[c][c];
+      for(var k = c; k < 8; k++) A[r3][k] -= f * A[c][k];
+      b[r3] -= f * b[c];
+    }
+  }
+  var h = [];
+  for(var q = 0; q < 8; q++) h.push(b[q] / A[q][q]);
+  h.push(1);
+  return h;
+}
+
+function _enderezar(img, pts, anchoMax){
+  var W = img.naturalWidth, H = img.naturalHeight;
+  var src = pts.map(function(q){ return {x: q.x * W, y: q.y * H}; });
+  function largo(a, b){ return Math.hypot(a.x - b.x, a.y - b.y); }
+  // el rectangulo de salida toma el lado MAS LARGO de cada par: asi no se pierde detalle
+  // del borde que quedo mas cerca de la camara
+  var aw = Math.max(largo(src[0], src[1]), largo(src[3], src[2]));
+  var ah = Math.max(largo(src[0], src[3]), largo(src[1], src[2]));
+  var esc = Math.min(1, anchoMax / Math.max(aw, ah));
+  var w = Math.max(16, Math.round(aw * esc)), h = Math.max(16, Math.round(ah * esc));
+
+  var H3 = _homografia([{x:0,y:0},{x:w,y:0},{x:w,y:h},{x:0,y:h}], src);
+  if(!H3) return null;
+
+  var org = document.createElement("canvas");
+  org.width = W; org.height = H;
+  var oc = org.getContext("2d");
+  oc.drawImage(img, 0, 0);
+  var o = oc.getImageData(0, 0, W, H).data;
+
+  var out = document.createElement("canvas");
+  out.width = w; out.height = h;
+  var dc = out.getContext("2d");
+  var d = dc.createImageData(w, h), dd = d.data;
+
+  for(var y = 0; y < h; y++){
+    for(var x = 0; x < w; x++){
+      var den = H3[6] * x + H3[7] * y + 1;
+      var sx = (H3[0] * x + H3[1] * y + H3[2]) / den;
+      var sy = (H3[3] * x + H3[4] * y + H3[5]) / den;
+      var ix = sx | 0, iy = sy | 0, p = (y * w + x) * 4;
+      if(ix < 0 || iy < 0 || ix >= W || iy >= H){ dd[p+3] = 255; continue; }
+      var q = (iy * W + ix) * 4;
+      dd[p] = o[q]; dd[p+1] = o[q+1]; dd[p+2] = o[q+2]; dd[p+3] = 255;
+    }
+  }
+  dc.putImageData(d, 0, 0);
+  return out;
+}
+
 function achicar(file, rec, giro){
   return new Promise(function(res, rej){
     var img = new Image(), url = URL.createObjectURL(file);
     img.onload = function(){
-      var W = img.naturalWidth, H = img.naturalHeight;
-      var sx = 0, sy = 0, sw = W, sh = H;
-      if(rec){
-        sx = Math.round(rec.x * W); sy = Math.round(rec.y * H);
-        sw = Math.max(16, Math.round(rec.w * W)); sh = Math.max(16, Math.round(rec.h * H));
+      var c, cw, ch;
+      // `rec` son las CUATRO ESQUINAS. Si no forman un rectangulo —la factura estaba en
+      // angulo— se endereza; si lo forman, alcanza con recortar, que es mucho mas rapido.
+      var derecho = rec && Math.abs(rec[0].y - rec[1].y) < 0.004 &&
+                    Math.abs(rec[3].y - rec[2].y) < 0.004 &&
+                    Math.abs(rec[0].x - rec[3].x) < 0.004 &&
+                    Math.abs(rec[1].x - rec[2].x) < 0.004;
+      if(rec && !derecho){
+        c = _enderezar(img, rec, LADO);
+        if(c){ cw = c.width; ch = c.height; }
       }
-      var w = sw, h = sh;
-      var esc = Math.min(1, LADO / Math.max(w, h));
-      var cw = Math.round(w * esc), ch = Math.round(h * esc);
-      var c = document.createElement("canvas");
-      // girado 90 o 270, el lienzo va al reves: si no, la foto sale cortada
-      var g = ((giro || 0) % 360 + 360) % 360, vuelta = (g === 90 || g === 270);
-      c.width  = vuelta ? ch : cw;
-      c.height = vuelta ? cw : ch;
-      var cx = c.getContext("2d");
+      if(!c){
+        var W = img.naturalWidth, H = img.naturalHeight;
+        var sx = 0, sy = 0, sw = W, sh = H;
+        if(rec){
+          var xs = rec.map(function(q){ return q.x; }), ys = rec.map(function(q){ return q.y; });
+          var x0 = Math.min.apply(null, xs), y0 = Math.min.apply(null, ys);
+          sx = Math.round(x0 * W); sy = Math.round(y0 * H);
+          sw = Math.max(16, Math.round((Math.max.apply(null, xs) - x0) * W));
+          sh = Math.max(16, Math.round((Math.max.apply(null, ys) - y0) * H));
+        }
+        var esc = Math.min(1, LADO / Math.max(sw, sh));
+        cw = Math.round(sw * esc); ch = Math.round(sh * esc);
+        c = document.createElement("canvas");
+        c.width = cw; c.height = ch;
+        c.getContext("2d").drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
+      }
+      // el giro va DESPUES de enderezar: son dos cosas distintas y mezclarlas complica las
+      // cuentas sin ganar nada
+      var g = ((giro || 0) % 360 + 360) % 360;
       if(g){
-        cx.translate(c.width / 2, c.height / 2);
-        cx.rotate(g * Math.PI / 180);
-        cx.translate(-cw / 2, -ch / 2);
+        var vuelta = (g === 90 || g === 270);
+        var c2 = document.createElement("canvas");
+        c2.width  = vuelta ? ch : cw;
+        c2.height = vuelta ? cw : ch;
+        var cx2 = c2.getContext("2d");
+        cx2.translate(c2.width / 2, c2.height / 2);
+        cx2.rotate(g * Math.PI / 180);
+        cx2.drawImage(c, -cw / 2, -ch / 2);
+        c = c2; cw = c2.width; ch = c2.height;
       }
-      cx.drawImage(img, sx, sy, sw, sh, 0, 0, cw, ch);
-      if(g) cx.setTransform(1, 0, 0, 1, 0, 0);
-      cw = c.width; ch = c.height;
       URL.revokeObjectURL(url);
       c.toBlob(function(b){
         if(!b) return rej(new Error("no pude achicar la foto"));
@@ -434,7 +551,15 @@ function mandar(file, rec, giro){
 // La orientacion que graba el telefono (EXIF) si se corrige sola: el navegador
 // la aplica al cargar la imagen.
 // ---------------------------------------------------------------------------
-var _rec = null, _giro = 0, _img = null, _arch = null, _tocando = null;
+// Las cuatro esquinas, en proporciones de 0 a 1 y SIEMPRE en este orden:
+//     0 arriba-izquierda   1 arriba-derecha   2 abajo-derecha   3 abajo-izquierda
+// El orden importa: es el que usa el enderezado para saber cual lado es cual.
+var _pts = null, _giro = 0, _img = null, _arch = null, _tocando = -1;
+
+function _deRect(r){
+  return [{x:r.x, y:r.y}, {x:r.x + r.w, y:r.y},
+          {x:r.x + r.w, y:r.y + r.h}, {x:r.x, y:r.y + r.h}];
+}
 
 function recAbrir(file){
   _arch = file; _giro = 0;
@@ -452,9 +577,14 @@ function recAbrir(file){
   im.onload = function(){
     _img = im;
     var d = detectarPapel(im);
-    _rec = d || {x:0.05, y:0.05, w:0.90, h:0.90};
+    // Cuando NO detecta, el recuadro arranca al 80% y no al 90%: asi las manijas quedan
+    // bien adentro de la foto y se agarran con el dedo. Al 90% quedaban pegadas al borde
+    // —y con la barra del navegador encima— casi imposibles de tocar (Fredy, 23/09/2026).
+    // acotado también acá: la detección le suma un respiro de 1,5% a cada lado y eso, con
+    // un papel que ya llegaba al borde, se pasa de la foto
+    _pts = _deRect(recAcotar(d || {x:0.10, y:0.10, w:0.80, h:0.80}));
     $("recAviso").textContent = d ? "Encontré el documento. Ajustá si hace falta."
-                                  : "No pude encontrar el borde. Ajustá el recuadro.";
+                                  : "Arrastrá las esquinas hasta el borde de la factura.";
     // y se espera un cuadro de video a que el navegador acomode la imagen: `onload` dice
     // que los pixeles llegaron, no que ya tengan lugar y tamaño en la pantalla
     requestAnimationFrame(function(){ requestAnimationFrame(recPintar); });
@@ -479,53 +609,98 @@ function recCerrar(){
 }
 
 function recPintar(){
-  var im = $("recImg"), caja = $("recCaja");
-  if(!im || !_rec) return;
+  var im = $("recImg"), svg = $("recSvg");
+  if(!im || !_pts || !svg) return;
   var r = im.getBoundingClientRect(), p = im.parentNode.getBoundingClientRect();
 
-  // RED DE SEGURIDAD: si la imagen todavia no tiene tamaño, no se dibuja el recuadro y se
-  // vuelve a intentar. Sin esto, un recuadro de 0x0 hace que su sombra —que es la que
-  // oscurece lo de afuera— tape la pantalla entera, y el usuario queda trabado mirando
-  // gris. Ya paso una vez; que no dependa de acertar el orden en un solo lugar.
+  // RED DE SEGURIDAD: si la imagen todavia no tiene tamaño, no se dibuja nada y se vuelve a
+  // intentar. Sin esto el oscurecido tapaba la pantalla entera y el usuario quedaba trabado
+  // mirando gris. Ya paso una vez; que no dependa de acertar el orden en un solo lugar.
   if(r.width < 4 || r.height < 4){
-    caja.style.display = "none";
+    svg.style.display = "none";
     setTimeout(recPintar, 120);
     return;
   }
-  caja.style.display = "";
-  caja.style.left   = (r.left - p.left + _rec.x * r.width) + "px";
-  caja.style.top    = (r.top  - p.top  + _rec.y * r.height) + "px";
-  caja.style.width  = (_rec.w * r.width) + "px";
-  caja.style.height = (_rec.h * r.height) + "px";
+  svg.style.display = "";
+  svg.style.left = (r.left - p.left) + "px";
+  svg.style.top  = (r.top  - p.top)  + "px";
+  svg.setAttribute("width", r.width);
+  svg.setAttribute("height", r.height);
+
+  var pts = _pts.map(function(q){
+    return (q.x * r.width).toFixed(1) + "," + (q.y * r.height).toFixed(1);
+  }).join(" ");
+  $("recHueco").setAttribute("points", pts);
+  $("recBorde").setAttribute("points", pts);
+
+  var g = $("recManijas"), h = "";
+  _pts.forEach(function(q, i){
+    h += '<circle cx="' + (q.x * r.width).toFixed(1) + '" cy="' + (q.y * r.height).toFixed(1)
+       + '" r="15" fill="#38bdf8" stroke="#fff" stroke-width="2.5" data-i="' + i + '"></circle>';
+  });
+  g.innerHTML = h;
+  Array.prototype.forEach.call(g.querySelectorAll("circle"), function(c){
+    var i = +c.getAttribute("data-i");
+    c.addEventListener("touchstart", function(e){ recTomar(e, i); }, {passive:false});
+    c.addEventListener("mousedown",  function(e){ recTomar(e, i); });
+  });
   im.style.transform = "rotate(" + _giro + "deg)";
+}
+
+// EL RECUADRO NO PUEDE SALIRSE DE LA FOTO, NUNCA.
+//
+// Si se sale, las manijas se van con el y no queda de donde agarrarlo: el recorte se pierde
+// y hay que volver a sacar la foto (Fredy, 23/09/2026: "el recorte si se desborda ya no se
+// puede recuperar").
+//
+// Pasaba al GIRAR: al rotar el rectangulo, `x` se calcula como `1 - y - alto`, y si el
+// recuadro tocaba el borde de abajo ese numero daba negativo.
+//
+// Se acota en UN SOLO LUGAR y se llama desde todos, en vez de arreglar cada cuenta por
+// separado: asi cualquier camino nuevo queda cubierto sin acordarse.
+function recAcotar(r){
+  var MIN = 0.08;                                  // ni tan chico que no se pueda agarrar
+  var w = Math.min(1, Math.max(MIN, r.w || MIN));
+  var h = Math.min(1, Math.max(MIN, r.h || MIN));
+  return {x: Math.min(1 - w, Math.max(0, r.x || 0)),
+          y: Math.min(1 - h, Math.max(0, r.y || 0)), w: w, h: h};
 }
 
 function recGirar(){
   _giro = (_giro + 90) % 360;
-  // al girar, el recuadro tambien gira: si no, queda marcando otra parte del papel
-  _rec = {x: 1 - _rec.y - _rec.h, y: _rec.x, w: _rec.h, h: _rec.w};
+  // Cada esquina gira con la foto: (x,y) -> (1-y, x). Y se ROTA LA LISTA para que el orden
+  // siga siendo arriba-izquierda, arriba-derecha, abajo-derecha, abajo-izquierda: si no, el
+  // enderezado tomaria por "ancho" lo que ahora es el alto y saldria acostado.
+  var g = _pts.map(function(q){ return {x: 1 - q.y, y: q.x}; });
+  _pts = [g[3], g[0], g[1], g[2]].map(_acotarPunto);
   recPintar();
 }
 
-function recTodo(){ _rec = {x:0, y:0, w:1, h:1}; recPintar(); }
+function recTodo(){ _pts = _deRect({x:0, y:0, w:1, h:1}); recPintar(); }
 
-// arrastre de las esquinas, con el dedo o con el mouse
-function recTomar(ev, esquina){
-  ev.preventDefault(); _tocando = esquina;
+// Por si algo queda mal igual: vuelve al 80% sin perder la foto ni el giro.
+function recReiniciar(){ _pts = _deRect({x:0.10, y:0.10, w:0.80, h:0.80}); recPintar(); }
+
+function _acotarPunto(q){
+  return {x: Math.min(1, Math.max(0, q.x)), y: Math.min(1, Math.max(0, q.y))};
+}
+
+// Arrastre de UNA esquina, con el dedo o con el mouse. Cada una se mueve sola: es lo que
+// permite seguir un papel torcido, que era el pedido (Fredy, 23/09/2026, con un dibujo de un
+// rectangulo al lado de un trapecio).
+function recTomar(ev, i){
+  ev.preventDefault(); ev.stopPropagation(); _tocando = i;
   function mover(e){
-    if(!_tocando || !_rec) return;
+    if(_tocando < 0 || !_pts) return;
+    if(e.cancelable) e.preventDefault();
     var t = (e.touches && e.touches[0]) || e;
     var r = $("recImg").getBoundingClientRect();
-    var px = Math.min(1, Math.max(0, (t.clientX - r.left) / r.width));
-    var py = Math.min(1, Math.max(0, (t.clientY - r.top)  / r.height));
-    var x0 = _rec.x, y0 = _rec.y, x1 = _rec.x + _rec.w, y1 = _rec.y + _rec.h;
-    if(_tocando.indexOf("i") >= 0) x0 = Math.min(px, x1 - 0.08); else x1 = Math.max(px, x0 + 0.08);
-    if(_tocando.indexOf("a") >= 0) y0 = Math.min(py, y1 - 0.08); else y1 = Math.max(py, y0 + 0.08);
-    _rec = {x:x0, y:y0, w:x1 - x0, h:y1 - y0};
+    _pts[_tocando] = _acotarPunto({x: (t.clientX - r.left) / r.width,
+                                   y: (t.clientY - r.top)  / r.height});
     recPintar();
   }
   function soltar(){
-    _tocando = null;
+    _tocando = -1;
     document.removeEventListener("touchmove", mover); document.removeEventListener("mousemove", mover);
     document.removeEventListener("touchend", soltar);  document.removeEventListener("mouseup", soltar);
   }
@@ -536,7 +711,7 @@ function recTomar(ev, esquina){
 }
 
 function recEnviar(){
-  var f = _arch, r = _rec, g = _giro;
+  var f = _arch, r = _pts ? _pts.map(function(q){ return {x:q.x, y:q.y}; }) : null, g = _giro;
   recCerrar();
   if(f) mandar(f, r, g);
 }
